@@ -26,16 +26,12 @@ class PdfSkiaModule : Module() {
 
   private fun meta(): Map<String, Any> {
     val doc = document ?: throw IllegalStateException("No PDF open")
-    val page = doc.openPage(0)
-    try {
-      return mapOf(
-        "pageCount" to doc.pageCount,
-        "width" to page.pageWidthPoint,
-        "height" to page.pageHeightPoint,
-      )
-    } finally {
-      page.close()
-    }
+    val core = pdfium()
+    return mapOf(
+      "pageCount" to core.getPageCount(doc),
+      "width" to core.getPageWidthPoint(doc, 0),
+      "height" to core.getPageHeightPoint(doc, 0),
+    )
   }
 
   override fun definition() = ModuleDefinition {
@@ -62,31 +58,17 @@ class PdfSkiaModule : Module() {
     AsyncFunction("renderPage") { pageIndex: Int, targetWidth: Int ->
       val doc = document ?: throw IllegalStateException("No PDF open")
       if (targetWidth <= 0) throw IllegalArgumentException("targetWidth must be positive")
-      val page = doc.openPage(pageIndex)
-      try {
-        val pageWidth = page.pageWidthPoint.coerceAtLeast(1)
-        val pageHeight = page.pageHeightPoint.coerceAtLeast(1)
-        val targetHeight = (targetWidth.toDouble() * pageHeight / pageWidth).toInt().coerceAtLeast(1)
-        val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-        page.renderPageBitmap(
-          bitmap,
-          0,
-          0,
-          targetWidth,
-          targetHeight,
-          false,
-          false,
-          0xFFFFFFFF.toInt(),
-          0xFFFFFFFF.toInt(),
-        )
-        val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
-        bitmap.recycle()
-        val encoded = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-        "data:image/jpeg;base64,$encoded"
-      } finally {
-        page.close()
-      }
+      val core = pdfium()
+      val pageWidth = core.getPageWidthPoint(doc, pageIndex).coerceAtLeast(1)
+      val pageHeight = core.getPageHeightPoint(doc, pageIndex).coerceAtLeast(1)
+      val targetHeight = (targetWidth.toDouble() * pageHeight / pageWidth).toInt().coerceAtLeast(1)
+      val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+      core.renderPageBitmap(doc, bitmap, pageIndex, 0, 0, targetWidth, targetHeight, false, false)
+      val out = ByteArrayOutputStream()
+      bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)
+      bitmap.recycle()
+      val encoded = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+      "data:image/jpeg;base64,$encoded"
     }
 
     Function("close") { closeDocument() }
