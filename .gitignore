@@ -1,0 +1,20 @@
+node_modules/
+.pnpm-store/
+.expo/
+dist/
+build/
+*.log
+.DS_Store
+
+# Generated native projects (CNG). Recreate with `pnpm prebuild`.
+apps/*/android/
+apps/*/ios/
+
+# Local only. Never commit copyrighted books.
+samples/
+
+# Secrets and signing
+.env
+.env.*
+*.jks
+*.keystore
