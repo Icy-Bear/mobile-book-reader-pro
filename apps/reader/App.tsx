@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -9,6 +9,13 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import Animated, {
+  runOnJS,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 import PdfSkia, { type PdfMeta } from './modules/pdf-skia/src/PdfSkiaModule';
 
 const PAPER = '#FFFCF6';
@@ -19,8 +26,23 @@ const BG = '#F7F3EA';
 export default function App() {
   const { width, height } = useWindowDimensions();
   const [meta, setMeta] = useState<PdfMeta | null>(null);
+  const [ready, setReady] = useState(false);
+  const [pageIndex, setPageIndex] = useState(0);
   const [pageUri, setPageUri] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const cache = useRef(new Map<string, string>());
+  const renderChain = useRef<Promise<void>>(Promise.resolve());
+  const direction = useRef(1);
+
+  const scale = useSharedValue(1);
+  const savedScale = useSharedValue(1);
+  const tx = useSharedValue(0);
+  const ty = useSharedValue(0);
+  const savedX = useSharedValue(0);
+  const savedY = useSharedValue(0);
+  const opacity = useSharedValue(0);
+  const slide = useSharedValue(0);
 
   const { pageW, pageH } = useMemo(() => {
     const maxW = Math.min(width - 32, 430);
@@ -36,61 +58,172 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    setError(null);
-
     (async () => {
       try {
         const info = await PdfSkia.openAsset('test-book.pdf');
         if (cancelled) return;
         setMeta(info);
-
-        const targetWidth = Math.round(pageW * PixelRatio.get());
-        const uri = await PdfSkia.renderPage(0, targetWidth);
-        if (!cancelled) setPageUri(uri);
+        setReady(true);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    const targetWidth = Math.round(pageW * PixelRatio.get());
+    const key = `${pageIndex}:${targetWidth}`;
+
+    renderChain.current = renderChain.current.then(async () => {
+      if (cancelled) return;
+      try {
+        let uri = cache.current.get(key);
+        if (!uri) {
+          uri = await PdfSkia.renderPage(pageIndex, targetWidth);
+          if (cancelled) return;
+          cache.current.set(key, uri);
+        }
+        if (!cancelled) {
+          setError(null);
+          setPageUri(uri);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      }
+    });
 
     return () => {
       cancelled = true;
     };
-  }, [pageW]);
+  }, [ready, pageIndex, pageW]);
+
+  useEffect(() => {
+    if (!pageUri) return;
+    opacity.value = 0;
+    slide.value = direction.current * 26;
+    opacity.value = withTiming(1, { duration: 200 });
+    slide.value = withTiming(0, { duration: 240 });
+  }, [pageUri, opacity, slide]);
+
+  useEffect(() => {
+    scale.value = withTiming(1, { duration: 140 });
+    savedScale.value = 1;
+    tx.value = withTiming(0, { duration: 140 });
+    ty.value = withTiming(0, { duration: 140 });
+    savedX.value = 0;
+    savedY.value = 0;
+  }, [pageIndex, scale, savedScale, tx, ty, savedX, savedY]);
+
+  const turnTo = (target: number) => {
+    const max = (meta?.pageCount ?? 1) - 1;
+    const next = Math.max(0, Math.min(max, target));
+    if (next === pageIndex) return;
+    direction.current = next > pageIndex ? 1 : -1;
+    setPageIndex(next);
+  };
+
+  const pinch = Gesture.Pinch()
+    .onUpdate((event) => {
+      scale.value = Math.min(4, Math.max(1, savedScale.value * event.scale));
+    })
+    .onEnd(() => {
+      savedScale.value = scale.value;
+      if (scale.value <= 1.01) {
+        scale.value = withTiming(1);
+        savedScale.value = 1;
+        tx.value = withTiming(0);
+        ty.value = withTiming(0);
+        savedX.value = 0;
+        savedY.value = 0;
+      }
+    });
+
+  const pan = Gesture.Pan()
+    .onUpdate((event) => {
+      if (scale.value <= 1.01) return;
+      const maxX = (pageW * (scale.value - 1)) / 2;
+      const maxY = (pageH * (scale.value - 1)) / 2;
+      tx.value = Math.min(maxX, Math.max(-maxX, savedX.value + event.translationX));
+      ty.value = Math.min(maxY, Math.max(-maxY, savedY.value + event.translationY));
+    })
+    .onEnd(() => {
+      savedX.value = tx.value;
+      savedY.value = ty.value;
+    });
+
+  const tap = Gesture.Tap()
+    .maxDuration(250)
+    .onEnd((event) => {
+      if (scale.value > 1.01) return;
+      runOnJS(turnTo)(event.x < pageW / 2 ? pageIndex - 1 : pageIndex + 1);
+    });
+
+  const gesture = Gesture.Simultaneous(pinch, pan, tap);
+
+  const pageStyle = useAnimatedStyle(() => ({
+    opacity: opacity.value,
+    transform: [
+      { translateX: tx.value + slide.value },
+      { translateY: ty.value },
+      { scale: scale.value },
+    ],
+  }));
 
   return (
-    <View style={styles.container}>
-      <StatusBar style="dark" />
+    <GestureHandlerRootView style={styles.root}>
+      <View style={styles.container}>
+        <StatusBar style="dark" />
 
-      <View style={styles.header}>
-        <Text style={styles.brand}>Den</Text>
-        <Text style={styles.meta}>test-book.pdf</Text>
-      </View>
+        <View style={styles.header}>
+          <Text style={styles.brand}>Den</Text>
+          <Text style={styles.meta}>test-book.pdf</Text>
+        </View>
 
-      <View style={styles.stage}>
-        <View style={[styles.page, { width: pageW, height: pageH }]}>
-          {pageUri ? (
-            <Image source={{ uri: pageUri }} style={StyleSheet.absoluteFill} resizeMode="contain" />
-          ) : error ? (
-            <View style={styles.pageState}>
-              <Text style={styles.error}>{error}</Text>
+        <GestureDetector gesture={gesture}>
+          <View style={styles.stage}>
+            <View style={[styles.page, { width: pageW, height: pageH }]}>
+              <Animated.View style={[StyleSheet.absoluteFill, pageStyle]}>
+                {pageUri ? (
+                  <Image
+                    source={{ uri: pageUri }}
+                    style={StyleSheet.absoluteFill}
+                    resizeMode="contain"
+                  />
+                ) : error ? (
+                  <View style={styles.pageState}>
+                    <Text style={styles.error}>{error}</Text>
+                  </View>
+                ) : (
+                  <View style={styles.pageState}>
+                    <ActivityIndicator color={MUTED} />
+                  </View>
+                )}
+              </Animated.View>
             </View>
-          ) : (
-            <View style={styles.pageState}>
-              <ActivityIndicator color={MUTED} />
-            </View>
-          )}
+          </View>
+        </GestureDetector>
+
+        <View style={styles.footer}>
+          <Text style={styles.pageNumber}>
+            {meta ? `${pageIndex + 1} · ${meta.pageCount}` : '—'}
+          </Text>
+          <Text style={styles.hint}>tap to turn · pinch to zoom</Text>
         </View>
       </View>
-
-      <View style={styles.footer}>
-        <Text style={styles.pageNumber}>{meta ? `1 · ${meta.pageCount}` : '1 · —'}</Text>
-        <Text style={styles.hint}>tap to turn · pinch to zoom</Text>
-      </View>
-    </View>
+    </GestureHandlerRootView>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: BG,
+  },
   container: {
     flex: 1,
     backgroundColor: BG,
