@@ -59,15 +59,9 @@ jobs:
             "ndk;27.1.12297006" \
             "cmake;3.22.1"
 
-      - name: Add swap and show resources
+      - name: Show runner resources
         run: |
           nproc
-          free -h
-          sudo rm -f /swapfile
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
           free -h
 
       - name: Install JS dependencies
