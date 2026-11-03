@@ -1,6 +1,11 @@
 package com.icybear.pdfskia
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.os.ParcelFileDescriptor
 import android.util.Base64
 import expo.modules.kotlin.modules.Module
@@ -69,6 +74,81 @@ class PdfSkiaModule : Module() {
       bitmap.recycle()
       val encoded = Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
       "data:image/jpeg;base64,$encoded"
+    }
+
+    AsyncFunction("getPageText") { pageIndex: Int ->
+      val doc = document ?: throw IllegalStateException("No PDF open")
+      val page = doc.openPage(pageIndex) ?: throw IllegalStateException("Could not open page $pageIndex")
+      val textPage = page.openTextPage()
+      try {
+        val count = textPage.textPageCountChars()
+        if (count <= 0) ""
+        else textPage.textPageGetText(0, count) ?: ""
+      } finally {
+        textPage.close()
+        page.close()
+      }
+    }
+
+    AsyncFunction("getTextAtPoint") { pageIndex: Int, xNorm: Double, yNorm: Double ->
+      val doc = document ?: throw IllegalStateException("No PDF open")
+      val core = pdfium()
+      val pageW = core.getPageWidthPoint(doc, pageIndex).toFloat()
+      val pageH = core.getPageHeightPoint(doc, pageIndex).toFloat()
+
+      val page = doc.openPage(pageIndex) ?: throw IllegalStateException("Could not open page $pageIndex")
+      val textPage = page.openTextPage()
+      try {
+        val xPt = (xNorm.toFloat() * pageW).coerceIn(0f, pageW)
+        val yPt = ((1.0f - yNorm.toFloat()) * pageH).coerceIn(0f, pageH)
+
+        val charIdx = textPage.textPageGetCharIndexAtPos(xPt.toDouble(), yPt.toDouble(), 18.0, 18.0)
+        if (charIdx >= 0) {
+          val charBox = textPage.textPageGetCharBox(charIdx)
+          if (charBox != null) {
+            val wordBox = RectF(
+              (charBox.left - 40f).coerceAtLeast(0f),
+              (charBox.top + 4f).coerceAtMost(pageH),
+              (charBox.right + 40f).coerceAtMost(pageW),
+              (charBox.bottom - 4f).coerceAtLeast(0f)
+            )
+            val raw = textPage.textPageGetBoundedText(wordBox, 128) ?: ""
+            val word = raw.trim().split(Regex("\\s+")).firstOrNull { it.isNotEmpty() } ?: ""
+
+            mapOf(
+              "text" to word,
+              "xNorm" to xNorm,
+              "yNorm" to yNorm,
+              "box" to mapOf(
+                "x" to (charBox.left / pageW),
+                "y" to (1f - charBox.top / pageH),
+                "w" to ((charBox.right - charBox.left) / pageW),
+                "h" to ((charBox.top - charBox.bottom) / pageH)
+              )
+            )
+          } else {
+            mapOf("text" to "", "xNorm" to xNorm, "yNorm" to yNorm)
+          }
+        } else {
+          mapOf("text" to "", "xNorm" to xNorm, "yNorm" to yNorm)
+        }
+      } finally {
+        textPage.close()
+        page.close()
+      }
+    }
+
+    Function("copyToClipboard") { text: String ->
+      val context = appContext.reactContext ?: return@Function false
+      val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+      val clip = ClipData.newPlainText("Den", text)
+      clipboard?.setPrimaryClip(clip)
+      true
+    }
+
+    Function("unlockOrientation") {
+      appContext.currentActivity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+      true
     }
 
     Function("close") { closeDocument() }

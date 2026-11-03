@@ -6,11 +6,20 @@ import Library from './src/Library';
 import Reader from './src/Reader';
 import type { Book } from './src/books';
 
-export default function App() {
-  const [book, setBook] = useState<Book | null>(null);
+let activeBook: Book | null = null;
 
-  const openBook = useCallback((next: Book) => setBook(next), []);
-  const closeBook = useCallback(() => setBook(null), []);
+export default function App() {
+  const [book, setBookState] = useState<Book | null>(activeBook);
+
+  const openBook = useCallback((next: Book) => {
+    activeBook = next;
+    setBookState(next);
+  }, []);
+
+  const closeBook = useCallback(() => {
+    activeBook = null;
+    setBookState(null);
+  }, []);
 
   return (
     <GestureHandlerRootView style={styles.root}>
