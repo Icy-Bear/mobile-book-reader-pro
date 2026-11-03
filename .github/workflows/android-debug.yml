@@ -59,6 +59,17 @@ jobs:
             "ndk;27.1.12297006" \
             "cmake;3.22.1"
 
+      - name: Add swap and show resources
+        run: |
+          nproc
+          free -h
+          sudo rm -f /swapfile
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
@@ -70,13 +81,15 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK (arm64 only)
+      - name: Build release APK (arm64 only)
         working-directory: apps/reader/android
-        run: ./gradlew assembleDebug --no-daemon -PreactNativeArchitectures=arm64-v8a
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: ./gradlew assembleRelease --no-daemon --no-parallel --max-workers=2 -PreactNativeArchitectures=arm64-v8a
 
       - uses: actions/upload-artifact@v4
         with:
-          name: debug-apk
-          path: apps/reader/android/app/build/outputs/apk/debug/app-debug.apk
+          name: release-apk
+          path: apps/reader/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 14
