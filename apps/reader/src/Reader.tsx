@@ -14,6 +14,7 @@ import {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   Easing,
+  interpolate,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
@@ -24,10 +25,12 @@ import type { Book } from './books';
 
 const BG = '#F7F3EA';
 const PAPER = '#FFFCF6';
+const BACK_PAPER = '#F4EFE6';
 const INK = '#1E1A16';
-const MUTED = '#6B6258';
-const TURN_MS = 320;
-const CACHE_LIMIT = 12;
+const MUTED = '#7A7064';
+const FOLIO = '#8C8275';
+const TURN_MS = 400;
+const CACHE_LIMIT = 14;
 
 type Incoming = { index: number; uri: string; dir: number };
 
@@ -44,6 +47,7 @@ export default function Reader({ book, onClose }: Props) {
   const [pageUri, setPageUri] = useState<string | null>(null);
   const [incoming, setIncoming] = useState<Incoming | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showControls, setShowControls] = useState(false);
 
   const cache = useRef(new Map<string, string>());
   const chain = useRef<Promise<void>>(Promise.resolve());
@@ -58,9 +62,11 @@ export default function Reader({ book, onClose }: Props) {
   pageCountRef.current = meta?.pageCount ?? 1;
   incomingRef.current = incoming;
 
+  // Turn animation values
   const progress = useSharedValue(0);
-  const turnDir = useSharedValue(1);
+  const turnDir = useSharedValue(1); // 1 = next, -1 = prev
 
+  // Zoom / pan values
   const scale = useSharedValue(1);
   const savedScale = useSharedValue(1);
   const tx = useSharedValue(0);
@@ -68,17 +74,18 @@ export default function Reader({ book, onClose }: Props) {
   const savedX = useSharedValue(0);
   const savedY = useSharedValue(0);
 
+  // Full-screen optimal dimensions: edge-to-edge width, natural PDF aspect ratio
   const { pageW, pageH } = useMemo(() => {
-    const maxW = width - 24;
-    const maxH = height - 116;
-    let w = maxW;
-    let h = w * 1.5;
-    if (h > maxH) {
-      h = maxH;
-      w = h / 1.5;
-    }
+    const w = width; // Fill 100% of device screen width
+    const aspect =
+      meta && meta.width > 0 && meta.height > 0
+        ? meta.height / meta.width
+        : 1.5;
+    const naturalH = Math.round(w * aspect);
+    // Never exceed screen height, but use full width
+    const h = Math.min(height, naturalH);
     return { pageW: w, pageH: h };
-  }, [width, height]);
+  }, [width, height, meta]);
 
   pageWRef.current = pageW;
 
@@ -157,6 +164,7 @@ export default function Reader({ book, onClose }: Props) {
     return task;
   }, []);
 
+  // Render current page
   useEffect(() => {
     if (!ready) return;
     let cancelled = false;
@@ -167,6 +175,10 @@ export default function Reader({ book, onClose }: Props) {
         if (cancelled || !mounted.current) return;
         setError(null);
         setPageUri(uri);
+        // Pre-fetch adjacent next page for instant turning
+        if (pageIndex + 1 < pageCountRef.current) {
+          enqueueRender(pageIndex + 1, targetWidth).catch(() => {});
+        }
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -177,6 +189,7 @@ export default function Reader({ book, onClose }: Props) {
     };
   }, [ready, pageIndex, pageW, enqueueRender]);
 
+  // Reset zoom on page turn
   useEffect(() => {
     scale.value = withTiming(1, { duration: 140 });
     savedScale.value = 1;
@@ -196,12 +209,16 @@ export default function Reader({ book, onClose }: Props) {
     progress.value = 0;
   }, [progress]);
 
+  // Run the 3D physical page turn animation
   useEffect(() => {
     if (!incoming) return;
     progress.value = 0;
     progress.value = withTiming(
       1,
-      { duration: TURN_MS, easing: Easing.inOut(Easing.cubic) },
+      {
+        duration: TURN_MS,
+        easing: Easing.bezier(0.25, 0.1, 0.25, 1),
+      },
       (finished) => {
         if (finished) runOnJS(commitIncoming)();
       },
@@ -236,6 +253,10 @@ export default function Reader({ book, onClose }: Props) {
     [ready, enqueueRender, turnDir],
   );
 
+  const toggleControls = useCallback(() => {
+    setShowControls((prev) => !prev);
+  }, []);
+
   const gesture = useMemo(() => {
     const pinch = Gesture.Pinch()
       .onUpdate((event) => {
@@ -269,21 +290,29 @@ export default function Reader({ book, onClose }: Props) {
         }
         const dx = event.translationX;
         const dy = event.translationY;
-        if (Math.abs(dx) > 56 && Math.abs(dx) > Math.abs(dy) * 1.4) {
+        if (Math.abs(dx) > 42 && Math.abs(dx) > Math.abs(dy) * 1.3) {
           runOnJS(requestTurn)(dx < 0 ? 1 : -1);
         }
       });
 
     const tap = Gesture.Tap()
       .maxDuration(250)
-      .maxDistance(12)
+      .maxDistance(14)
       .onEnd((event) => {
         if (scale.value > 1.01) return;
-        runOnJS(requestTurn)(event.x < pageW / 2 ? -1 : 1);
+        const x = event.x;
+        // Left 30% turns back, right 30% turns forward, middle 40% toggles controls
+        if (x < pageW * 0.3) {
+          runOnJS(requestTurn)(-1);
+        } else if (x > pageW * 0.7) {
+          runOnJS(requestTurn)(1);
+        } else {
+          runOnJS(toggleControls)();
+        }
       });
 
     return Gesture.Simultaneous(pinch, pan, tap);
-  }, [pageW, pageH, scale, savedScale, tx, ty, savedX, savedY, requestTurn]);
+  }, [pageW, pageH, scale, savedScale, tx, ty, savedX, savedY, requestTurn, toggleControls]);
 
   const zoomStyle = useAnimatedStyle(() => ({
     transform: [
@@ -293,36 +322,122 @@ export default function Reader({ book, onClose }: Props) {
     ],
   }));
 
-  const baseStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: -turnDir.value * progress.value * pageW }],
-  }));
+  // 3D Physical page turn: Top leaf lifting and swinging around the left spine
+  // Forward (dir=1): Current page lifts from right edge and rotates 0 -> -180 deg
+  // Backward (dir=-1): Incoming page swings from left (-180 -> 0 deg) and settles flat
+  const turningLeafStyle = useAnimatedStyle(() => {
+    const isForward = turnDir.value > 0;
+    const p = progress.value;
+    const angle = isForward ? -p * 180 : -(1 - p) * 180;
 
-  const incomingStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: turnDir.value * (1 - progress.value) * pageW }],
-  }));
+    return {
+      transform: [
+        { perspective: 1400 },
+        { translateX: pageW / 2 },
+        { rotateY: `${angle}deg` },
+        { translateX: -pageW / 2 },
+      ],
+    };
+  });
+
+  // Dynamic ambient shadow on turning leaf as it angles into the light
+  const leafAmbientStyle = useAnimatedStyle(() => {
+    const p = progress.value;
+    // Peak shadow around 60-80 degrees (p ~ 0.35-0.45)
+    const peak = Math.sin(p * Math.PI);
+    return {
+      opacity: peak * 0.32,
+    };
+  });
+
+  // Front face of leaf is visible from 0 to 90 degrees
+  const leafFrontFaceStyle = useAnimatedStyle(() => {
+    const isForward = turnDir.value > 0;
+    const p = progress.value;
+    const isFront = isForward ? p < 0.5 : p >= 0.5;
+    return {
+      opacity: isFront ? 1 : 0,
+    };
+  });
+
+  // Back face of leaf is visible from 90 to 180 degrees
+  const leafBackFaceStyle = useAnimatedStyle(() => {
+    const isForward = turnDir.value > 0;
+    const p = progress.value;
+    const isBack = isForward ? p >= 0.5 : p < 0.5;
+    return {
+      opacity: isBack ? 1 : 0,
+    };
+  });
+
+  // Moving drop shadow cast by lifting page edge onto the page underneath
+  const sweepShadowStyle = useAnimatedStyle(() => {
+    const isForward = turnDir.value > 0;
+    const p = progress.value;
+    // Shadow position moves across from right to left (forward) or left to right (backward)
+    const pos = isForward ? (1 - p * 1.6) * pageW : p * 1.6 * pageW - pageW * 0.3;
+    const shadowOpacity = interpolate(p, [0, 0.4, 0.85, 1], [0.15, 0.42, 0.15, 0]);
+
+    return {
+      transform: [{ translateX: pos }],
+      opacity: shadowOpacity,
+    };
+  });
+
+  // Underneath page shadow that dissolves as the top page lifts off
+  const underShadowStyle = useAnimatedStyle(() => {
+    const p = progress.value;
+    return {
+      opacity: (1 - p) * 0.22,
+    };
+  });
+
+  // Determine which page is on bottom and which is the lifting leaf
+  const isTurning = incoming !== null;
+  const isForward = (incoming?.dir ?? 1) > 0;
+
+  // For forward turn: base is incoming (page N+1), turning leaf is current (page N)
+  // For backward turn: base is current (page N), turning leaf is incoming (page N-1)
+  const baseUri = isTurning
+    ? isForward
+      ? incoming.uri
+      : pageUri
+    : pageUri;
+
+  const leafUri = isTurning
+    ? isForward
+      ? pageUri
+      : incoming.uri
+    : null;
 
   return (
     <View style={styles.root}>
       <StatusBar hidden />
 
-      <View style={styles.header}>
-        <Pressable onPress={onClose} hitSlop={14} style={styles.back}>
-          <Text style={styles.backText}>‹</Text>
-        </Pressable>
-        <Text style={styles.title} numberOfLines={1}>
-          {book.title}
-        </Text>
-        <View style={styles.headerSpacer} />
-      </View>
+      {/* Floating Top Controls (Toggled by center tap) */}
+      {showControls && (
+        <View style={styles.floatingHeader}>
+          <Pressable onPress={onClose} hitSlop={16} style={styles.backButton}>
+            <Text style={styles.backChevron}>‹</Text>
+            <Text style={styles.backLabel}>Library</Text>
+          </Pressable>
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {book.title}
+          </Text>
+          <View style={styles.headerSpacer} />
+        </View>
+      )}
 
+      {/* Main Full-Screen Stage */}
       <View style={styles.stage}>
         <GestureDetector gesture={gesture}>
-          <View style={[styles.page, { width: pageW, height: pageH }]}>
+          <View style={[styles.bookContainer, { width: pageW, height: pageH }]}>
             <Animated.View style={[StyleSheet.absoluteFill, zoomStyle]}>
-              <Animated.View style={[StyleSheet.absoluteFill, baseStyle]}>
-                {pageUri ? (
+              {/* Layer 0: Flat Base Page (Revealed underneath) */}
+              <View style={StyleSheet.absoluteFill}>
+                {baseUri ? (
                   <Image
-                    source={{ uri: pageUri }}
+                    source={{ uri: baseUri }}
                     style={StyleSheet.absoluteFill}
                     resizeMode="contain"
                   />
@@ -335,27 +450,70 @@ export default function Reader({ book, onClose }: Props) {
                     <ActivityIndicator color={MUTED} />
                   </View>
                 )}
-              </Animated.View>
 
-              {incoming ? (
-                <Animated.View
-                  style={[StyleSheet.absoluteFill, styles.incomingPage, incomingStyle]}
-                >
-                  <Image
-                    source={{ uri: incoming.uri }}
-                    style={StyleSheet.absoluteFill}
-                    resizeMode="contain"
+                {/* Spine crease shadow along the left edge */}
+                <View style={styles.spineShadow} />
+
+                {/* Underneath shadow dissolving during turn */}
+                {isTurning && (
+                  <Animated.View
+                    style={[StyleSheet.absoluteFill, styles.underShadow, underShadowStyle]}
                   />
+                )}
+
+                {/* Moving drop shadow cast by lifting leaf edge */}
+                {isTurning && (
+                  <Animated.View
+                    style={[styles.sweepingShadow, sweepShadowStyle]}
+                  />
+                )}
+              </View>
+
+              {/* Layer 1: 3D Turning Leaf (Lifts and rotates) */}
+              {isTurning && leafUri && (
+                <Animated.View
+                  style={[StyleSheet.absoluteFill, styles.turningLeaf, turningLeafStyle]}
+                >
+                  {/* Front face of leaf (Current page lifting) */}
+                  <Animated.View
+                    style={[StyleSheet.absoluteFill, leafFrontFaceStyle]}
+                  >
+                    <Image
+                      source={{ uri: leafUri }}
+                      style={StyleSheet.absoluteFill}
+                      resizeMode="contain"
+                    />
+                    <View style={styles.spineShadow} />
+                    {/* Ambient light variation as page rotates */}
+                    <Animated.View
+                      style={[StyleSheet.absoluteFill, styles.leafAmbient, leafAmbientStyle]}
+                    />
+                  </Animated.View>
+
+                  {/* Back face of leaf (Warm physical paper backing) */}
+                  <Animated.View
+                    style={[StyleSheet.absoluteFill, styles.leafBackFace, leafBackFaceStyle]}
+                  >
+                    {/* Reverse spine shadow on back face */}
+                    <View style={styles.reverseSpineShadow} />
+                    {/* Ambient light on back face */}
+                    <Animated.View
+                      style={[StyleSheet.absoluteFill, styles.leafAmbient, leafAmbientStyle]}
+                    />
+                  </Animated.View>
                 </Animated.View>
-              ) : null}
+              )}
             </Animated.View>
           </View>
         </GestureDetector>
       </View>
 
-      <View style={styles.footer}>
-        <Text style={styles.pageNumber}>
-          {meta ? `${pageIndex + 1} / ${meta.pageCount}` : '—'}
+      {/* Floating Bottom Folio (Page Number) */}
+      <View style={styles.folioContainer} pointerEvents="none">
+        <Text style={styles.folioText}>
+          {meta
+            ? `${pageIndex + 1}  ·  ${meta.pageCount}`
+            : '—'}
         </Text>
       </View>
     </View>
@@ -366,55 +524,66 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: BG,
-    paddingTop: 18,
-    paddingBottom: 16,
-  },
-  header: {
-    height: 40,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 14,
-  },
-  back: {
-    width: 36,
-    height: 36,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  backText: {
-    color: INK,
-    fontSize: 30,
-    lineHeight: 32,
-    marginTop: -2,
-  },
-  title: {
-    flex: 1,
-    color: INK,
-    fontSize: 13,
-    letterSpacing: 0.2,
-    textAlign: 'center',
-  },
-  headerSpacer: {
-    width: 36,
+    position: 'relative',
   },
   stage: {
     flex: 1,
+    backgroundColor: BG,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
   },
-  page: {
+  bookContainer: {
     backgroundColor: PAPER,
-    borderRadius: 4,
-    elevation: 8,
-    shadowColor: '#1E1A16',
-    shadowOpacity: 0.16,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
     overflow: 'hidden',
   },
-  incomingPage: {
+  spineShadow: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: 22,
+    backgroundColor: 'rgba(28, 22, 16, 0.07)',
+    borderRightWidth: 1,
+    borderRightColor: 'rgba(28, 22, 16, 0.04)',
+  },
+  reverseSpineShadow: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    right: 0,
+    width: 22,
+    backgroundColor: 'rgba(28, 22, 16, 0.07)',
+    borderLeftWidth: 1,
+    borderLeftColor: 'rgba(28, 22, 16, 0.04)',
+  },
+  sweepingShadow: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 44,
+    backgroundColor: 'rgba(24, 18, 12, 0.22)',
+    shadowColor: '#000',
+    shadowOpacity: 0.38,
+    shadowRadius: 18,
+    elevation: 14,
+  },
+  underShadow: {
+    backgroundColor: 'rgba(20, 16, 12, 0.2)',
+  },
+  turningLeaf: {
     backgroundColor: PAPER,
+    backfaceVisibility: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.28,
+    shadowRadius: 20,
+    elevation: 16,
+  },
+  leafAmbient: {
+    backgroundColor: '#000',
+  },
+  leafBackFace: {
+    backgroundColor: BACK_PAPER,
+    transform: [{ scaleX: -1 }], // mirrored for back face
   },
   pageState: {
     position: 'absolute',
@@ -428,19 +597,68 @@ const styles = StyleSheet.create({
   },
   error: {
     color: MUTED,
-    fontSize: 12,
+    fontSize: 13,
     lineHeight: 18,
     textAlign: 'center',
   },
-  footer: {
-    height: 32,
+  floatingHeader: {
+    position: 'absolute',
+    top: 14,
+    left: 14,
+    right: 14,
+    height: 44,
+    zIndex: 60,
+    flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    paddingHorizontal: 12,
+    borderRadius: 22,
+    backgroundColor: 'rgba(247, 243, 234, 0.92)',
+    shadowColor: '#1E1A16',
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 6,
   },
-  pageNumber: {
+  backButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingRight: 10,
+  },
+  backChevron: {
+    color: INK,
+    fontSize: 26,
+    lineHeight: 28,
+    marginTop: -2,
+    marginRight: 4,
+  },
+  backLabel: {
+    color: INK,
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  headerTitle: {
+    flex: 1,
     color: MUTED,
     fontSize: 12,
-    letterSpacing: 0.4,
+    letterSpacing: 0.3,
+    textAlign: 'center',
+    paddingHorizontal: 8,
+  },
+  headerSpacer: {
+    width: 60,
+  },
+  folioContainer: {
+    position: 'absolute',
+    bottom: 12,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 40,
+  },
+  folioText: {
+    color: FOLIO,
+    fontSize: 11,
+    letterSpacing: 1.2,
     fontVariant: ['tabular-nums'],
+    opacity: 0.85,
   },
 });
